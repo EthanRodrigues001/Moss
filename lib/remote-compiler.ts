@@ -103,6 +103,7 @@ export async function compileProjectRemotely(
 
   const contentType = response.headers.get("content-type") ?? "";
   if (response.ok && contentType.includes("application/pdf")) {
+    logBackendCompiler("legacy-pdf", "tectonic", true);
     return {
       ok: true,
       pdfBlob: await response.blob(),
@@ -117,6 +118,7 @@ export async function compileProjectRemotely(
 
   if (response.ok && jsonPayload?.ok === true && typeof jsonPayload.pdfBase64 === "string") {
     const payload = jsonPayload as RemoteCompileSuccess;
+    logBackendCompiler(payload.compiler, payload.engine, true);
     return {
       ok: true,
       pdfBlob: base64ToBlob(payload.pdfBase64, "application/pdf"),
@@ -135,6 +137,7 @@ export async function compileProjectRemotely(
     ? errorPayload.log
     : await response.text().catch(() => "Remote compiler failed.");
   const structuredDiagnostics = Array.isArray(errorPayload?.diagnostics) ? errorPayload.diagnostics : [];
+  logBackendCompiler(errorPayload?.compiler ?? "unknown", errorPayload?.engine ?? "unknown", false);
 
   return {
     ok: false,
@@ -199,4 +202,11 @@ function base64ToBlob(base64: string, mimeType: string) {
 
 function diagnosticsToStrings(diagnostics: CompileDiagnostic[] = []) {
   return diagnostics.map((diagnostic) => diagnostic.title || diagnostic.message).filter(Boolean);
+}
+
+function logBackendCompiler(compiler: string | undefined, engine: string | undefined, ok: boolean) {
+  console.info(
+    `%cMoss backend compiler: ${compiler ?? "unknown"} / ${engine ?? "unknown"} (${ok ? "ok" : "failed"})`,
+    "color: #f97316; font-weight: 700;",
+  );
 }
