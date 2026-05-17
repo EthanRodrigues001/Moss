@@ -64,6 +64,16 @@ enum CompilerMode {
     Tectonic,
 }
 
+impl CompilerMode {
+    fn as_log_label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Latexmk => "latexmk",
+            Self::Tectonic => "tectonic",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum CompilerName {
@@ -271,6 +281,7 @@ async fn main() -> Result<(), std::io::Error> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    load_env_files();
     let config = Arc::new(Config::from_env());
     fs::create_dir_all(&config.tectonic_cache_dir).await?;
     fs::create_dir_all(&config.artifact_dir).await?;
@@ -292,9 +303,53 @@ async fn main() -> Result<(), std::io::Error> {
     let address = SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!("Moss compiler backend listening on {address}");
+    log_backend_config(&config);
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await
+}
+
+fn load_env_files() {
+    let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let parent_dir = current_dir.parent().map(Path::to_path_buf);
+    let mut candidates = vec![
+        current_dir.join(".env"),
+        current_dir.join(".env.local"),
+    ];
+    if let Some(parent) = parent_dir {
+        candidates.push(parent.join(".env"));
+        candidates.push(parent.join(".env.local"));
+    }
+
+    for path in candidates {
+        if path.exists() {
+            match dotenvy::from_path(&path) {
+                Ok(_) => info!(path = %path.display(), "Loaded Moss backend env file"),
+                Err(error) => error!(path = %path.display(), %error, "Failed to load Moss backend env file"),
+            }
+        }
+    }
+}
+
+fn log_backend_config(config: &Config) {
+    const ORANGE: &str = "\x1b[38;5;208m";
+    const RESET: &str = "\x1b[0m";
+    println!(
+        "{ORANGE}Moss backend config: mode={} latexmk={} tectonic={} synctex={} timeout={}ms{RESET}",
+        config.compiler_mode.as_log_label(),
+        config.latexmk_bin,
+        config.tectonic_bin,
+        config.synctex_bin,
+        config.compile_timeout.as_millis(),
+    );
+    info!(
+        mode = config.compiler_mode.as_log_label(),
+        latexmk = %config.latexmk_bin,
+        tectonic = %config.tectonic_bin,
+        synctex = %config.synctex_bin,
+        timeout_ms = config.compile_timeout.as_millis(),
+        "Moss backend config"
+    );
 }
 
 impl Config {
