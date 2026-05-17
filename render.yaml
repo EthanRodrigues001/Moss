@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: moss-compiler
+    env: docker
+    rootDir: backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: CORS_ORIGIN
+        value: https://your-moss-frontend.vercel.app
+      - key: MAX_UPLOAD_MB
+        value: 80
+      - key: COMPILE_TIMEOUT_MS
+        value: 60000
+      - key: MOSS_COMPILER_ENGINE
+        value: auto
+      - key: LATEXMK_BIN
+        value: latexmk
+      - key: TECTONIC_BIN
+        value: tectonic
+      - key: TECTONIC_CACHE_DIR
+        value: /tmp/moss-tectonic-cache
+      - key: COMPILE_ARTIFACT_TTL_MS
+        value: 600000
