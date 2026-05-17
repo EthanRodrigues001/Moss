@@ -1,5 +1,6 @@
 import katex from "katex";
 import type { CompileResult, Project, ProjectFile } from "@/lib/types";
+import { logCompilerUsed } from "@/lib/compiler-console";
 
 type PreviewBlock =
   | { kind: "heading"; level: number; text: string }
@@ -47,6 +48,7 @@ export async function compileProject(project: Project, files: ProjectFile[], ima
   const preview = parseLatex(expanded, project);
   const previewHtml = renderPreviewHtml(preview, imageUrls);
   const pageCount = countPreviewPages(previewHtml);
+  logCompilerUsed({ source: "browser", compiler: "moss-preview", engine: preview.layout, ok: true });
 
   return {
     ok: true,
