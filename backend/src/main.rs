@@ -94,6 +94,15 @@ impl CompilerEngine {
     }
 }
 
+impl CompilerName {
+    fn as_log_label(self) -> &'static str {
+        match self {
+            Self::Latexmk => "latexmk",
+            Self::Tectonic => "tectonic",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CompileArtifact {
     created_at: SystemTime,
@@ -490,6 +499,12 @@ async fn compile_project(
         let log = read_compile_log(&workspace_path, &output_dir, &root_path)
             .await
             .unwrap_or(run.log);
+        log_backend_compiler_used(
+            run.compiler,
+            run.engine,
+            false,
+            started_at.elapsed().as_millis(),
+        );
         return Err(CompileError::CompilerFailed {
             status: run.status,
             log,
@@ -514,6 +529,12 @@ async fn compile_project(
         "Recompiled with Moss {} compiler in {} ms.",
         run.engine.as_log_label(),
         started_at.elapsed().as_millis()
+    );
+    log_backend_compiler_used(
+        run.compiler,
+        run.engine,
+        true,
+        started_at.elapsed().as_millis(),
     );
 
     let synctex_path = find_synctex_path(&workspace_path, &output_dir, &root_path).await;
@@ -551,6 +572,30 @@ fn detect_engine(root_content: &str) -> CompilerEngine {
         return CompilerEngine::LuaLaTeX;
     }
     CompilerEngine::PdfLaTeX
+}
+
+fn log_backend_compiler_used(
+    compiler: CompilerName,
+    engine: CompilerEngine,
+    ok: bool,
+    duration_ms: u128,
+) {
+    const ORANGE: &str = "\x1b[38;5;208m";
+    const RESET: &str = "\x1b[0m";
+    let status = if ok { "ok" } else { "failed" };
+    let compiler_label = compiler.as_log_label();
+    let engine_label = engine.as_log_label();
+
+    println!(
+        "{ORANGE}Moss backend compiler used: {compiler_label} / {engine_label} ({status}) in {duration_ms}ms{RESET}"
+    );
+    info!(
+        compiler = compiler_label,
+        engine = engine_label,
+        ok,
+        duration_ms,
+        "Moss backend compiler used"
+    );
 }
 
 fn validate_engine(config: &Config, engine: CompilerEngine) -> Result<(), CompileError> {
