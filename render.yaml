@@ -13,19 +13,15 @@ services:
       - key: COMPILE_TIMEOUT_MS
         value: 60000
       - key: MOSS_COMPILER_ENGINE
-        value: auto
+        value: latexmk
       - key: LATEXMK_BIN
         value: latexmk
-      - key: TECTONIC_BIN
-        value: tectonic
       - key: SYNCTEX_BIN
         value: synctex
       - key: ENABLE_XELATEX
         value: false
       - key: ENABLE_LUALATEX
         value: false
-      - key: TECTONIC_CACHE_DIR
-        value: /tmp/moss-tectonic-cache
       - key: COMPILE_WORK_DIR
         value: /tmp/moss-compile-work
       - key: COMPILE_ARTIFACT_DIR
