@@ -7,7 +7,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: CORS_ORIGIN
-        value: https://your-moss-frontend.vercel.app
+        value: "*"
       - key: MAX_UPLOAD_MB
         value: 80
       - key: COMPILE_TIMEOUT_MS
