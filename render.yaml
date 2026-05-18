@@ -18,7 +18,17 @@ services:
         value: latexmk
       - key: TECTONIC_BIN
         value: tectonic
+      - key: SYNCTEX_BIN
+        value: synctex
+      - key: ENABLE_XELATEX
+        value: false
+      - key: ENABLE_LUALATEX
+        value: false
       - key: TECTONIC_CACHE_DIR
         value: /tmp/moss-tectonic-cache
+      - key: COMPILE_WORK_DIR
+        value: /tmp/moss-compile-work
+      - key: COMPILE_ARTIFACT_DIR
+        value: /tmp/moss-compile-artifacts
       - key: COMPILE_ARTIFACT_TTL_MS
         value: 600000

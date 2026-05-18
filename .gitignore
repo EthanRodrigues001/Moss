@@ -22,6 +22,7 @@
 /backend/target
 /backend/bin
 /backend/.tectonic-cache
+/backend/.compile-tmp
 
 # misc
 .DS_Store

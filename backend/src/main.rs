@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
-    env, io,
+    env,
+    ffi::OsString,
+    io,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
@@ -50,9 +52,11 @@ struct Config {
     latexmk_bin: String,
     tectonic_bin: String,
     synctex_bin: String,
+    compiler_extra_path: Vec<PathBuf>,
     enable_xelatex: bool,
     enable_lualatex: bool,
     tectonic_cache_dir: PathBuf,
+    compile_work_dir: PathBuf,
     artifact_dir: PathBuf,
     artifact_ttl: Duration,
 }
@@ -248,7 +252,9 @@ enum CompileError {
         path: String,
         source: base64::DecodeError,
     },
-    #[error("{engine} is detected, but this Render compiler profile only supports PDFLaTeX. Switch template/packages or enable that engine later.")]
+    #[error(
+        "{engine} is detected, but this Render compiler profile only supports PDFLaTeX. Switch template/packages or enable that engine later."
+    )]
     UnsupportedEngine {
         engine: &'static str,
         detected: CompilerEngine,
@@ -312,10 +318,7 @@ async fn main() -> Result<(), std::io::Error> {
 fn load_env_files() {
     let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let parent_dir = current_dir.parent().map(Path::to_path_buf);
-    let mut candidates = vec![
-        current_dir.join(".env"),
-        current_dir.join(".env.local"),
-    ];
+    let mut candidates = vec![current_dir.join(".env"), current_dir.join(".env.local")];
     if let Some(parent) = parent_dir {
         candidates.push(parent.join(".env"));
         candidates.push(parent.join(".env.local"));
@@ -323,9 +326,13 @@ fn load_env_files() {
 
     for path in candidates {
         if path.exists() {
-            match dotenvy::from_path(&path) {
-                Ok(_) => info!(path = %path.display(), "Loaded Moss backend env file"),
-                Err(error) => error!(path = %path.display(), %error, "Failed to load Moss backend env file"),
+            match dotenvy::from_path_override(&path) {
+                Ok(_) => {
+                    info!(path = %path.display(), "Loaded Moss backend env file with override")
+                }
+                Err(error) => {
+                    error!(path = %path.display(), %error, "Failed to load Moss backend env file")
+                }
             }
         }
     }
@@ -334,13 +341,16 @@ fn load_env_files() {
 fn log_backend_config(config: &Config) {
     const ORANGE: &str = "\x1b[38;5;208m";
     const RESET: &str = "\x1b[0m";
+    let extra_path = format_path_list(&config.compiler_extra_path);
     println!(
-        "{ORANGE}Moss backend config: mode={} latexmk={} tectonic={} synctex={} timeout={}ms{RESET}",
+        "{ORANGE}Moss backend config: mode={} latexmk={} tectonic={} synctex={} timeout={}ms work_dir={} extra_path={}{RESET}",
         config.compiler_mode.as_log_label(),
         config.latexmk_bin,
         config.tectonic_bin,
         config.synctex_bin,
         config.compile_timeout.as_millis(),
+        config.compile_work_dir.display(),
+        extra_path,
     );
     info!(
         mode = config.compiler_mode.as_log_label(),
@@ -348,6 +358,8 @@ fn log_backend_config(config: &Config) {
         tectonic = %config.tectonic_bin,
         synctex = %config.synctex_bin,
         timeout_ms = config.compile_timeout.as_millis(),
+        work_dir = %config.compile_work_dir.display(),
+        extra_path = %extra_path,
         "Moss backend config"
     );
 }
@@ -380,6 +392,13 @@ impl Config {
                     .unwrap_or_else(|_| env::temp_dir())
                     .join(".tectonic-cache")
             });
+        let compile_work_dir = env::var_os("COMPILE_WORK_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                env::current_dir()
+                    .unwrap_or_else(|_| env::temp_dir())
+                    .join(".compile-tmp")
+            });
 
         Self {
             port,
@@ -390,9 +409,11 @@ impl Config {
             latexmk_bin: env::var("LATEXMK_BIN").unwrap_or_else(|_| "latexmk".to_string()),
             tectonic_bin: discover_tectonic_bin(),
             synctex_bin: env::var("SYNCTEX_BIN").unwrap_or_else(|_| "synctex".to_string()),
+            compiler_extra_path: compiler_extra_path_from_env(),
             enable_xelatex: env_flag("ENABLE_XELATEX"),
             enable_lualatex: env_flag("ENABLE_LUALATEX"),
             tectonic_cache_dir,
+            compile_work_dir,
             artifact_dir,
             artifact_ttl: Duration::from_millis(artifact_ttl_ms),
         }
@@ -409,6 +430,24 @@ fn compiler_mode_from_env() -> CompilerMode {
         "tectonic" => CompilerMode::Tectonic,
         _ => CompilerMode::Auto,
     }
+}
+
+fn compiler_extra_path_from_env() -> Vec<PathBuf> {
+    env::var_os("COMPILER_EXTRA_PATH")
+        .map(|value| env::split_paths(&value).collect())
+        .unwrap_or_default()
+}
+
+fn format_path_list(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return "-".to_string();
+    }
+
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn env_flag(name: &str) -> bool {
@@ -519,7 +558,10 @@ async fn compile_project(
     }
 
     let root_path = safe_project_path(&request.root_file_path)?;
-    let work_dir = tempfile::Builder::new().prefix("moss-compile-").tempdir()?;
+    fs::create_dir_all(&config.compile_work_dir).await?;
+    let work_dir = tempfile::Builder::new()
+        .prefix("moss-compile-")
+        .tempdir_in(&config.compile_work_dir)?;
     let workspace_path = work_dir.path().to_path_buf();
     let output_dir = workspace_path.join("out");
     fs::create_dir_all(&output_dir).await?;
@@ -547,8 +589,14 @@ async fn compile_project(
     validate_engine(config, detected_engine)?;
 
     let started_at = Instant::now();
-    let root_absolute_path = workspace_path.join(&root_path);
-    let run = run_compiler(config, detected_engine, &root_absolute_path, &output_dir, &workspace_path).await?;
+    let run = run_compiler(
+        config,
+        detected_engine,
+        &root_path,
+        &output_dir,
+        &workspace_path,
+    )
+    .await?;
 
     if run.status != 0 {
         let log = read_compile_log(&workspace_path, &output_dir, &root_path)
@@ -655,12 +703,10 @@ fn log_backend_compiler_used(
 
 fn validate_engine(config: &Config, engine: CompilerEngine) -> Result<(), CompileError> {
     match engine {
-        CompilerEngine::XeLaTeX if !config.enable_xelatex => {
-            Err(CompileError::UnsupportedEngine {
-                engine: "XeLaTeX",
-                detected: engine,
-            })
-        }
+        CompilerEngine::XeLaTeX if !config.enable_xelatex => Err(CompileError::UnsupportedEngine {
+            engine: "XeLaTeX",
+            detected: engine,
+        }),
         CompilerEngine::LuaLaTeX if !config.enable_lualatex => {
             Err(CompileError::UnsupportedEngine {
                 engine: "LuaLaTeX",
@@ -702,29 +748,33 @@ async fn write_project_file(
 async fn run_compiler(
     config: &Config,
     detected_engine: CompilerEngine,
-    root_absolute_path: &Path,
+    root_path: &Path,
     output_dir: &Path,
     cwd: &Path,
 ) -> Result<CompilerRun, CompileError> {
     match config.compiler_mode {
-        CompilerMode::Tectonic => run_tectonic(config, root_absolute_path, output_dir, cwd).await,
+        CompilerMode::Tectonic => run_tectonic(config, root_path, output_dir, cwd).await,
         CompilerMode::Latexmk => {
-            run_latexmk(config, detected_engine, root_absolute_path, output_dir, cwd).await
+            run_latexmk(config, detected_engine, root_path, output_dir, cwd).await
         }
-        CompilerMode::Auto => match run_latexmk(config, detected_engine, root_absolute_path, output_dir, cwd).await {
-            Ok(run) => Ok(run),
-            Err(CompileError::MissingCompiler { .. }) if detected_engine == CompilerEngine::PdfLaTeX => {
-                run_tectonic(config, root_absolute_path, output_dir, cwd).await
+        CompilerMode::Auto => {
+            match run_latexmk(config, detected_engine, root_path, output_dir, cwd).await {
+                Ok(run) => Ok(run),
+                Err(CompileError::MissingCompiler { .. })
+                    if detected_engine == CompilerEngine::PdfLaTeX =>
+                {
+                    run_tectonic(config, root_path, output_dir, cwd).await
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
-        },
+        }
     }
 }
 
 async fn run_latexmk(
     config: &Config,
     engine: CompilerEngine,
-    root_absolute_path: &Path,
+    root_path: &Path,
     _output_dir: &Path,
     cwd: &Path,
 ) -> Result<CompilerRun, CompileError> {
@@ -735,13 +785,15 @@ async fn run_latexmk(
         CompilerEngine::Tectonic => "-pdf",
     };
 
-    let child = Command::new(&config.latexmk_bin)
+    let mut command = Command::new(&config.latexmk_bin);
+    apply_compiler_environment(&mut command, config);
+    let child = command
         .arg(engine_arg)
         .arg("-interaction=nonstopmode")
         .arg("-file-line-error")
         .arg("-synctex=1")
         .arg("-outdir=out")
-        .arg(root_absolute_path)
+        .arg(root_path)
         .current_dir(cwd)
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
@@ -754,23 +806,32 @@ async fn run_latexmk(
 
 async fn run_tectonic(
     config: &Config,
-    root_absolute_path: &Path,
+    root_path: &Path,
     output_dir: &Path,
     cwd: &Path,
 ) -> Result<CompilerRun, CompileError> {
-    let child = Command::new(&config.tectonic_bin)
+    let mut command = Command::new(&config.tectonic_bin);
+    apply_compiler_environment(&mut command, config);
+    let child = command
         .arg("--keep-logs")
         .arg("--synctex")
         .arg("--outdir")
         .arg(output_dir)
-        .arg(root_absolute_path)
+        .arg(root_path)
         .current_dir(cwd)
         .env("TECTONIC_CACHE_DIR", &config.tectonic_cache_dir)
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|source| missing_compiler("tectonic", &config.tectonic_bin, Some(CompilerEngine::Tectonic), source))?;
+        .map_err(|source| {
+            missing_compiler(
+                "tectonic",
+                &config.tectonic_bin,
+                Some(CompilerEngine::Tectonic),
+                source,
+            )
+        })?;
 
     wait_for_compiler(
         child,
@@ -779,6 +840,27 @@ async fn run_tectonic(
         CompilerEngine::Tectonic,
     )
     .await
+}
+
+fn apply_compiler_environment(command: &mut Command, config: &Config) {
+    if let Some(path) = compiler_process_path(config) {
+        command.env("PATH", path);
+    }
+}
+
+fn compiler_process_path(config: &Config) -> Option<OsString> {
+    if config.compiler_extra_path.is_empty() {
+        return None;
+    }
+
+    let existing_path = env::var_os("PATH").unwrap_or_default();
+    let paths = config
+        .compiler_extra_path
+        .iter()
+        .cloned()
+        .chain(env::split_paths(&existing_path));
+
+    env::join_paths(paths).ok()
 }
 
 fn missing_compiler(
@@ -849,7 +931,11 @@ async fn read_compile_log(
     ))
 }
 
-async fn find_synctex_path(workspace: &Path, output_dir: &Path, root_path: &Path) -> Option<PathBuf> {
+async fn find_synctex_path(
+    workspace: &Path,
+    output_dir: &Path,
+    root_path: &Path,
+) -> Option<PathBuf> {
     let stem = root_path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -865,7 +951,10 @@ async fn find_synctex_path(workspace: &Path, output_dir: &Path, root_path: &Path
     None
 }
 
-async fn success_response(state: &AppState, output: CompileOutput) -> Result<Response, CompileError> {
+async fn success_response(
+    state: &AppState,
+    output: CompileOutput,
+) -> Result<Response, CompileError> {
     let compile_id = Uuid::new_v4().to_string();
     let artifact_dir = state.config.artifact_dir.join(&compile_id);
     fs::create_dir_all(&artifact_dir).await?;
@@ -982,8 +1071,10 @@ async fn run_synctex_reverse(
 }
 
 fn parse_synctex_field(log: &str, field: &str) -> Option<PathBuf> {
-    log.lines()
-        .find_map(|line| line.strip_prefix(&format!("{field}:")).map(|value| PathBuf::from(value.trim())))
+    log.lines().find_map(|line| {
+        line.strip_prefix(&format!("{field}:"))
+            .map(|value| PathBuf::from(value.trim()))
+    })
 }
 
 fn parse_synctex_number(log: &str, field: &str) -> Option<u32> {
@@ -1060,8 +1151,12 @@ fn push_regex_diagnostics(
 ) {
     let regex = Regex::new(pattern).expect("valid diagnostic regex");
     for captures in regex.captures_iter(log) {
-        let file_path = captures.get(1).map(|value| normalize_log_path(value.as_str()));
-        let line = captures.get(2).and_then(|value| value.as_str().parse().ok());
+        let file_path = captures
+            .get(1)
+            .map(|value| normalize_log_path(value.as_str()));
+        let line = captures
+            .get(2)
+            .and_then(|value| value.as_str().parse().ok());
         let message = captures
             .get(3)
             .map(|value| value.as_str().trim().to_string())
@@ -1088,7 +1183,8 @@ fn push_latex_warning_diagnostics(
     diagnostics: &mut Vec<CompileDiagnostic>,
     seen: &mut std::collections::HashSet<String>,
 ) {
-    let regex = Regex::new(r"LaTeX Warning:\s*([^\n]+?) on input line (\d+)").expect("valid warning regex");
+    let regex =
+        Regex::new(r"LaTeX Warning:\s*([^\n]+?) on input line (\d+)").expect("valid warning regex");
     for captures in regex.captures_iter(log) {
         push_diagnostic(
             diagnostics,
@@ -1112,7 +1208,9 @@ fn push_missing_file_diagnostics(
     diagnostics: &mut Vec<CompileDiagnostic>,
     seen: &mut std::collections::HashSet<String>,
 ) {
-    let regex = Regex::new(r"(?:LaTeX Error: )?File [`']([^`']+)[`'] not found(?: on input line (\d+))?").expect("valid missing file regex");
+    let regex =
+        Regex::new(r"(?:LaTeX Error: )?File [`']([^`']+)[`'] not found(?: on input line (\d+))?")
+            .expect("valid missing file regex");
     for captures in regex.captures_iter(log) {
         let missing = captures[1].to_string();
         push_diagnostic(
@@ -1121,9 +1219,13 @@ fn push_missing_file_diagnostics(
             CompileDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 title: format!("File '{missing}' not found"),
-                message: "Upload the file into the project tree or correct the relative path.".to_string(),
+                message: "Upload the file into the project tree or correct the relative path."
+                    .to_string(),
                 file_path: None,
-                line: captures.get(2).and_then(|value| value.as_str().parse().ok()).or_else(|| line_near(log, captures.get(0).map_or(0, |value| value.start()))),
+                line: captures
+                    .get(2)
+                    .and_then(|value| value.as_str().parse().ok())
+                    .or_else(|| line_near(log, captures.get(0).map_or(0, |value| value.start()))),
                 column: None,
                 excerpt: excerpt_near(log, captures.get(0).map_or(0, |value| value.start())),
                 category: "missing-file".to_string(),
@@ -1137,7 +1239,9 @@ fn push_undefined_reference_diagnostics(
     diagnostics: &mut Vec<CompileDiagnostic>,
     seen: &mut std::collections::HashSet<String>,
 ) {
-    let citation = Regex::new(r"LaTeX Warning: Citation [`']([^`']+)[`'].*?undefined on input line (\d+)").expect("valid citation regex");
+    let citation =
+        Regex::new(r"LaTeX Warning: Citation [`']([^`']+)[`'].*?undefined on input line (\d+)")
+            .expect("valid citation regex");
     for captures in citation.captures_iter(log) {
         push_diagnostic(
             diagnostics,
@@ -1155,7 +1259,9 @@ fn push_undefined_reference_diagnostics(
         );
     }
 
-    let reference = Regex::new(r"LaTeX Warning: Reference [`']([^`']+)[`'].*?undefined on input line (\d+)").expect("valid reference regex");
+    let reference =
+        Regex::new(r"LaTeX Warning: Reference [`']([^`']+)[`'].*?undefined on input line (\d+)")
+            .expect("valid reference regex");
     for captures in reference.captures_iter(log) {
         push_diagnostic(
             diagnostics,
@@ -1163,7 +1269,8 @@ fn push_undefined_reference_diagnostics(
             CompileDiagnostic {
                 severity: DiagnosticSeverity::Warning,
                 title: format!("Reference '{}' is undefined", &captures[1]),
-                message: "Add the matching label or compile again after labels are generated.".to_string(),
+                message: "Add the matching label or compile again after labels are generated."
+                    .to_string(),
                 file_path: None,
                 line: captures[2].parse().ok(),
                 column: None,
@@ -1227,7 +1334,11 @@ fn line_near(log: &str, index: usize) -> Option<u32> {
 
 fn excerpt_near(log: &str, index: usize) -> Option<String> {
     let end = (index + 700).min(log.len());
-    let excerpt = log[index..end].lines().take(6).collect::<Vec<_>>().join("\n");
+    let excerpt = log[index..end]
+        .lines()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("\n");
     if excerpt.trim().is_empty() {
         None
     } else {
@@ -1236,9 +1347,7 @@ fn excerpt_near(log: &str, index: usize) -> Option<String> {
 }
 
 fn normalize_log_path(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim_start_matches("./")
-        .to_string()
+    path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
 fn safe_project_path(input: &str) -> Result<PathBuf, CompileError> {
@@ -1446,8 +1555,14 @@ mod tests {
 
     #[test]
     fn parse_compile_diagnostics_should_find_missing_file() {
-        let diagnostics = parse_compile_diagnostics("LaTeX Error: File `figures/missing.png' not found.\nl.12 \\includegraphics{figures/missing.png}");
+        let diagnostics = parse_compile_diagnostics(
+            "LaTeX Error: File `figures/missing.png' not found.\nl.12 \\includegraphics{figures/missing.png}",
+        );
 
-        assert!(diagnostics.iter().any(|item| item.category == "missing-file"));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|item| item.category == "missing-file")
+        );
     }
 }

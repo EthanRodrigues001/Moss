@@ -62,11 +62,16 @@ COMPILE_TIMEOUT_MS=60000
 MOSS_COMPILER_ENGINE=auto
 LATEXMK_BIN=latexmk
 TECTONIC_BIN=tectonic
+SYNCTEX_BIN=synctex
+ENABLE_XELATEX=false
+ENABLE_LUALATEX=false
 TECTONIC_CACHE_DIR=/tmp/moss-tectonic-cache
+COMPILE_WORK_DIR=/tmp/moss-compile-work
+COMPILE_ARTIFACT_DIR=/tmp/moss-compile-artifacts
 COMPILE_ARTIFACT_TTL_MS=600000
 ```
 
-Render free instances can sleep, so the first compile after idle may be slow. The Docker image installs PDFLaTeX-focused TeX Live packages plus Tectonic. XeLaTeX/LuaLaTeX projects are detected and rejected with a clear structured error unless `ENABLE_XELATEX=true` or `ENABLE_LUALATEX=true` is set and the image is extended for those engines.
+Render free instances can sleep, so the first compile after idle may be slow. The Docker image installs Perl, `latexmk`, PDFLaTeX-focused TeX Live packages, and Tectonic. XeLaTeX/LuaLaTeX projects are detected and rejected with a clear structured error unless `ENABLE_XELATEX=true` or `ENABLE_LUALATEX=true` is set and the image is extended for those engines.
 
 ## API
 

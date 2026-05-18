@@ -16,6 +16,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
+    perl \
     latexmk \
     biber \
     tectonic \
@@ -35,7 +36,12 @@ ENV PORT=8787
 ENV MOSS_COMPILER_ENGINE=auto
 ENV LATEXMK_BIN=latexmk
 ENV TECTONIC_BIN=tectonic
+ENV SYNCTEX_BIN=synctex
+ENV ENABLE_XELATEX=false
+ENV ENABLE_LUALATEX=false
 ENV TECTONIC_CACHE_DIR=/tmp/moss-tectonic-cache
+ENV COMPILE_WORK_DIR=/tmp/moss-compile-work
+ENV COMPILE_ARTIFACT_DIR=/tmp/moss-compile-artifacts
 ENV COMPILE_ARTIFACT_TTL_MS=600000
 
 EXPOSE 8787
