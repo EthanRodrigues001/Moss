@@ -34,13 +34,17 @@ export function latexToTiptapDocument(source: string): JSONContent {
       continue;
     }
 
-    const heading = line.match(/^\\(section|subsection|subsubsection)\*?\{(.+)\}$/);
+    const heading = line.match(/^\\(section|subsection|subsubsection)(\*)?\{(.+)\}$/);
     if (heading) {
       flushParagraph();
+      if (heading[2] || hasComplexHeadingTitle(heading[3])) {
+        content.push(rawLatexNode(originalLine.trim(), "LaTeX heading"));
+        continue;
+      }
       content.push({
         type: "heading",
         attrs: { level: heading[1] === "section" ? 1 : heading[1] === "subsection" ? 2 : 3 },
-        content: [{ type: "text", text: unwrapText(heading[2]) }],
+        content: [{ type: "text", text: unwrapText(heading[3]) }],
       });
       continue;
     }
@@ -65,27 +69,28 @@ export function latexToTiptapDocument(source: string): JSONContent {
 
     if (/^\\begin\{(?:equation|align)\*?\}/.test(line)) {
       flushParagraph();
-      const math: string[] = [];
-      while (i + 1 < lines.length && !/\\end\{(?:equation|align)\*?\}/.test(lines[i + 1])) {
-        i += 1;
-        math.push(lines[i]);
-      }
-      i += 1;
-      content.push({ type: "blockMath", attrs: { latex: normalizeMath(math.join("\n")) } });
+      const environment = line.match(/^\\begin\{([^}]+)\}/)?.[1] ?? "equation";
+      const block = collectEnvironment(lines, i, environment);
+      content.push(rawLatexNode(block.source, mathEnvironmentLabel(environment)));
+      i = block.endIndex;
       continue;
     }
 
     if (line.startsWith("\\begin{itemize}") || line.startsWith("\\begin{enumerate}")) {
       flushParagraph();
       const ordered = line.startsWith("\\begin{enumerate}");
-      const items: JSONContent[] = [];
-      while (i + 1 < lines.length && !lines[i + 1].startsWith(`\\end{${ordered ? "enumerate" : "itemize"}}`)) {
-        i += 1;
-        const item = lines[i].trim().replace(/^\\item\s*/, "");
-        if (item) items.push({ type: "listItem", content: [{ type: "paragraph", content: inlineContent(item) }] });
+      const environment = ordered ? "enumerate" : "itemize";
+      const block = collectEnvironment(lines, i, environment);
+      const items = simpleLatexListItems(block.source, environment);
+      if (items) {
+        content.push({
+          type: ordered ? "orderedList" : "bulletList",
+          content: items.map((item) => ({ type: "listItem", content: [{ type: "paragraph", content: inlineContent(item) }] })),
+        });
+      } else {
+        content.push(rawLatexNode(block.source, ordered ? "Enumerated list" : "Itemized list"));
       }
-      i += 1;
-      content.push({ type: ordered ? "orderedList" : "bulletList", content: items });
+      i = block.endIndex;
       continue;
     }
 
@@ -95,6 +100,12 @@ export function latexToTiptapDocument(source: string): JSONContent {
       const block = collectEnvironment(lines, i, rawEnvironment.name);
       content.push(rawLatexNode(block.source, rawEnvironment.label));
       i = block.endIndex;
+      continue;
+    }
+
+    if (isProtectedLatexCommandLine(line)) {
+      flushParagraph();
+      content.push(rawLatexNode(originalLine.trim(), "LaTeX command"));
       continue;
     }
 
@@ -158,7 +169,7 @@ function inlineContent(text: string): JSONContent[] {
     if (part.startsWith("$") && part.endsWith("$")) {
       return { type: "inlineMath", attrs: { latex: normalizeMath(part.slice(1, -1)) } };
     }
-    return { type: "text", text: unwrapText(part) };
+    return { type: "text", text: part };
   });
 }
 
@@ -176,17 +187,55 @@ function documentBody(source: string) {
 }
 
 function collectEnvironment(lines: string[], startIndex: number, environment: string) {
-  const collected = [lines[startIndex]];
-  let index = startIndex;
-  while (index + 1 < lines.length && !lines[index + 1].trim().startsWith(`\\end{${environment}}`)) {
-    index += 1;
-    collected.push(lines[index]);
+  const collected: string[] = [];
+  const beginPattern = new RegExp(`\\\\begin\\{${escapeRegExp(environment)}\\}`, "g");
+  const endPattern = new RegExp(`\\\\end\\{${escapeRegExp(environment)}\\}`, "g");
+  let depth = 0;
+
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    collected.push(line);
+    depth += matchCount(line, beginPattern);
+    depth -= matchCount(line, endPattern);
+    if (depth <= 0 && collected.length > 0 && endPattern.test(line)) {
+      return { source: collected.join("\n"), endIndex: index };
+    }
+    beginPattern.lastIndex = 0;
+    endPattern.lastIndex = 0;
   }
-  if (index + 1 < lines.length) {
-    index += 1;
-    collected.push(lines[index]);
+
+  return { source: collected.join("\n"), endIndex: lines.length - 1 };
+}
+
+function simpleLatexListItems(source: string, environment: string) {
+  const lines = source.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines[0] !== `\\begin{${environment}}` || lines[lines.length - 1] !== `\\end{${environment}}`) return null;
+  const body = lines.slice(1, -1);
+  if (!body.length) return [];
+
+  const items: string[] = [];
+  for (const line of body) {
+    if (!line.startsWith("\\item ")) return null;
+    const item = line.replace(/^\\item\s+/, "").trim();
+    if (!item || /\\begin\{|\\end\{/.test(item)) return null;
+    items.push(item);
   }
-  return { source: collected.join("\n"), endIndex: index };
+  return items;
+}
+
+function hasComplexHeadingTitle(title: string) {
+  return /\\(?!LaTeX\b)/.test(title) || /[{}]/.test(title.replace(/\\LaTeX/g, ""));
+}
+
+function matchCount(value: string, pattern: RegExp) {
+  pattern.lastIndex = 0;
+  const matches = value.match(pattern);
+  pattern.lastIndex = 0;
+  return matches?.length ?? 0;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function rawEnvironmentForLine(line: string) {
@@ -207,8 +256,20 @@ function rawEnvironmentForLine(line: string) {
     thebibliography: "Bibliography",
   };
   const name = match[1];
-  const label = labels[name];
-  return label ? { name, label } : null;
+  const label = labels[name] ?? `LaTeX environment: ${name}`;
+  return { name, label };
+}
+
+function mathEnvironmentLabel(environment: string) {
+  return environment.startsWith("align") ? "Aligned equation" : "Equation";
+}
+
+function isProtectedLatexCommandLine(line: string) {
+  if (!line.startsWith("\\")) return false;
+  if (/^\\(section|subsection|subsubsection)\*?\{/.test(line)) return false;
+  if (/^\\(textbf|emph|textit|texttt|underline)\{/.test(line)) return false;
+  if (/^\\(?:item\b|begin\{|end\{|\[|\])/.test(line)) return false;
+  return true;
 }
 
 function rawLatexNode(latex: string, label = "LaTeX block"): JSONContent {
