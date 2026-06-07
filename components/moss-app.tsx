@@ -95,6 +95,11 @@ export default function MossApp() {
   const [newFolderPath, setNewFolderPath] = useState("figures");
   const [newCitationKey, setNewCitationKey] = useState("sample2026");
   const [newCitationBibtex, setNewCitationBibtex] = useState("");
+  const [newCitationTags, setNewCitationTags] = useState("");
+  const [manualCitationTitle, setManualCitationTitle] = useState("Untitled Moss Source");
+  const [manualCitationAuthor, setManualCitationAuthor] = useState("Author");
+  const [manualCitationYear, setManualCitationYear] = useState("2026");
+  const [citationImporting, setCitationImporting] = useState(false);
   const [equationLatex, setEquationLatex] = useState("\\int_0^1 x^2\\,dx = \\frac{1}{3}");
   const [rightPanel, setRightPanel] = useState<"preview" | "logs" | "sections" | "citations" | "equation">("preview");
   const [editorMode, setEditorMode] = useState<"code" | "visual">("code");
@@ -925,62 +930,110 @@ export default function MossApp() {
     downloadText(bibtex || "% No citations yet\n", "references.bib", "text/x-bibtex");
   }
 
-  async function addCitation() {
-    if (!supabase || !activeProject || !user || !newCitationKey.trim()) return;
-    const bibtex = newCitationBibtex.trim() || `@article{${newCitationKey},\n  title={Untitled},\n  author={Author},\n  year={2026}\n}`;
+  async function saveCitationRecord({
+    citeKey,
+    bibtex,
+    cslJson,
+    tags,
+    successMessage,
+  }: {
+    citeKey: string;
+    bibtex: string;
+    cslJson: Record<string, unknown>;
+    tags: string[];
+    successMessage: string;
+  }) {
+    if (!supabase || !activeProject || !user) return false;
+    if (citations.some((citation) => citation.cite_key.toLowerCase() === citeKey.toLowerCase())) {
+      toast.error(`Citation key '${citeKey}' already exists`);
+      return false;
+    }
     const { data, error } = await supabase
       .from("citations")
       .insert({
         project_id: activeProject.id,
         user_id: user.id,
-        cite_key: newCitationKey.trim(),
+        cite_key: citeKey,
         bibtex,
-        csl_json: {},
-        tags: [],
+        csl_json: cslJson,
+        tags,
       })
       .select()
       .single();
     if (error) {
       toast.error(error.message);
-      return;
+      return false;
     }
     setCitations((current) => [...current, data].sort((a, b) => a.cite_key.localeCompare(b.cite_key)));
+    toast.success(successMessage);
+    return true;
+  }
+
+  async function addCitation() {
+    const citeKey = normalizeCitationKeyInput(newCitationKey) || citationKeyFromParts(manualCitationAuthor, manualCitationYear);
+    const title = manualCitationTitle.trim() || "Untitled";
+    const author = manualCitationAuthor.trim() || "Author";
+    const year = normalizeCitationYear(manualCitationYear);
+    const tags = parseCitationTags(newCitationTags);
+    const cslJson: Record<string, unknown> = {
+      id: citeKey,
+      "citation-key": citeKey,
+      type: "article-journal",
+      title,
+      author: authorsToCsl(author),
+      issued: { "date-parts": [[Number(year)]] },
+    };
+    const bibtex = newCitationBibtex.trim() || buildManualBibtex({ citeKey, title, author, year });
+    const saved = await saveCitationRecord({
+      citeKey,
+      bibtex: normalizeBibtexKey(bibtex, citeKey),
+      cslJson,
+      tags,
+      successMessage: "Citation added",
+    });
+    if (!saved) return;
+    setNewCitationKey(citeKey);
     setNewCitationBibtex("");
   }
 
   async function importCitation() {
     if (!supabase || !activeProject || !user || !newCitationBibtex.trim()) return;
+    setCitationImporting(true);
     try {
       const Cite = (await import("citation-js")).default;
       const raw = newCitationBibtex.trim();
       const citation = looksLikeDoi(raw) ? await Cite.async(raw.replace(/^doi:\s*/i, "")) : new Cite(raw);
       const csl = (citation.data?.[0] ?? {}) as Record<string, unknown>;
       const importedKey = typeof csl["citation-key"] === "string" ? csl["citation-key"] : typeof csl.id === "string" ? csl.id : "";
-      const citeKey = newCitationKey.trim() || importedKey || citationKeyFromCsl(csl);
-      const bibtex = citation.format("bibtex");
-      const { data, error } = await supabase
-        .from("citations")
-        .insert({
-          project_id: activeProject.id,
-          user_id: user.id,
-          cite_key: citeKey,
-          bibtex,
-          csl_json: csl,
-          tags: [],
-        })
-        .select()
-        .single();
-      if (error) {
-        toast.error(error.message);
-        return;
-      }
-      setCitations((current) => [...current, data].sort((a, b) => a.cite_key.localeCompare(b.cite_key)));
+      const citeKey = normalizeCitationKeyInput(newCitationKey) || normalizeCitationKeyInput(importedKey) || citationKeyFromCsl(csl);
+      const bibtex = normalizeBibtexKey(citation.format("bibtex"), citeKey);
+      const tags = parseCitationTags(newCitationTags);
+      const saved = await saveCitationRecord({
+        citeKey,
+        bibtex,
+        cslJson: { ...csl, id: csl.id || citeKey, "citation-key": citeKey },
+        tags,
+        successMessage: "Citation imported",
+      });
+      if (!saved) return;
       setNewCitationKey(citeKey);
       setNewCitationBibtex("");
-      toast.success("Citation imported");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not import citation");
+    } finally {
+      setCitationImporting(false);
     }
+  }
+
+  function insertCitation(citeKey: string) {
+    const normalized = normalizeCitationKeyInput(citeKey);
+    if (!normalized) {
+      toast.error("Choose a citation key first");
+      return;
+    }
+    if (editorMode !== "code") setEditorMode("code");
+    insertAtCursor(`\\cite{${normalized}}`);
+    toast.success(`Inserted \\cite{${normalized}}`);
   }
 
   function insertAtCursor(text: string) {
@@ -1529,14 +1582,33 @@ export default function MossApp() {
                     <h2 className="text-sm font-semibold">Citations</h2>
                     <Button variant="ghost" size="sm" onClick={downloadBibtex}>Export .bib</Button>
                   </div>
-                  <input className="h-8 rounded-md border bg-background px-2 text-sm" value={newCitationKey} onChange={(event) => setNewCitationKey(event.target.value)} placeholder="cite key" />
-                  <textarea className="min-h-24 rounded-md border bg-background p-2 text-xs font-mono" value={newCitationBibtex} onChange={(event) => setNewCitationBibtex(event.target.value)} placeholder="@article{key,...}" />
+                  <div className="grid gap-2">
+                    <input className="h-8 rounded-md border bg-background px-2 text-sm" value={newCitationKey} onChange={(event) => setNewCitationKey(event.target.value)} placeholder="cite key" />
+                    <input className="h-8 rounded-md border bg-background px-2 text-sm" value={manualCitationTitle} onChange={(event) => setManualCitationTitle(event.target.value)} placeholder="title" />
+                    <div className="grid grid-cols-[1fr_5rem] gap-2">
+                      <input className="h-8 rounded-md border bg-background px-2 text-sm" value={manualCitationAuthor} onChange={(event) => setManualCitationAuthor(event.target.value)} placeholder="author" />
+                      <input className="h-8 rounded-md border bg-background px-2 text-sm" value={manualCitationYear} onChange={(event) => setManualCitationYear(event.target.value)} placeholder="year" />
+                    </div>
+                    <input className="h-8 rounded-md border bg-background px-2 text-sm" value={newCitationTags} onChange={(event) => setNewCitationTags(event.target.value)} placeholder="tags, comma separated" />
+                  </div>
+                  <textarea className="min-h-24 rounded-md border bg-background p-2 text-xs font-mono" value={newCitationBibtex} onChange={(event) => setNewCitationBibtex(event.target.value)} placeholder="Paste DOI or BibTeX. Leave empty to create a manual citation." />
                   <div className="flex gap-2">
                     <Button variant="outline" onClick={addCitation}>Add citation</Button>
-                    <Button variant="outline" onClick={importCitation}>Import DOI/BibTeX</Button>
-                    <Button variant="outline" onClick={() => insertAtCursor(`\\cite{${newCitationKey}}`)}>Insert cite</Button>
+                    <Button variant="outline" onClick={importCitation} disabled={citationImporting || !newCitationBibtex.trim()}>{citationImporting ? "Importing" : "Import DOI/BibTeX"}</Button>
+                    <Button variant="outline" onClick={() => insertCitation(newCitationKey)}>Insert cite</Button>
                   </div>
-                  {citations.map((citation) => <div className="rounded-md border p-2 text-xs" key={citation.id}>{citation.cite_key}</div>)}
+                  {citations.length ? citations.map((citation) => (
+                    <div className="rounded-md border p-2 text-xs" key={citation.id}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="font-mono font-medium">{citation.cite_key}</div>
+                          {citation.tags.length ? <div className="mt-1 text-muted-foreground">{citation.tags.join(", ")}</div> : null}
+                        </div>
+                        <Button variant="ghost" size="sm" onClick={() => insertCitation(citation.cite_key)}>Insert</Button>
+                      </div>
+                      {citation.bibtex ? <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 font-mono text-[11px] text-muted-foreground">{citation.bibtex}</pre> : null}
+                    </div>
+                  )) : <p className="text-sm text-muted-foreground">Import a DOI, paste BibTeX, or add a manual citation.</p>}
                 </section>
               ) : null}
 
@@ -1648,6 +1720,57 @@ function LogIssueCard({ issue, onJump }: { issue: LatexLogIssue; onJump: () => v
 
 function looksLikeDoi(value: string) {
   return /^(doi:\s*)?10\.\d{4,9}\/\S+$/i.test(value.trim());
+}
+
+function normalizeCitationKeyInput(value: string) {
+  return value.trim().replace(/[^a-zA-Z0-9:_-]+/g, "");
+}
+
+function normalizeCitationYear(value: string) {
+  const match = value.match(/\d{4}/);
+  return match?.[0] ?? String(new Date().getFullYear());
+}
+
+function parseCitationTags(value: string) {
+  return Array.from(new Set(value.split(",").map((tag) => tag.trim()).filter(Boolean)));
+}
+
+function citationKeyFromParts(author: string, year: string) {
+  const firstAuthor = author.split(/\s+and\s+|,/i)[0] || "source";
+  return `${firstAuthor.toLowerCase().replace(/[^a-z0-9]+/g, "")}${normalizeCitationYear(year)}`;
+}
+
+function authorsToCsl(author: string) {
+  return author
+    .split(/\s+and\s+/i)
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .map((name) => {
+      const parts = name.split(/\s+/);
+      const family = parts.pop() ?? name;
+      const given = parts.join(" ");
+      return given ? { given, family } : { family };
+    });
+}
+
+function escapeBibtexValue(value: string) {
+  return value.replace(/[{}]/g, "");
+}
+
+function buildManualBibtex({ citeKey, title, author, year }: { citeKey: string; title: string; author: string; year: string }) {
+  return [
+    `@article{${citeKey},`,
+    `  title={${escapeBibtexValue(title)}},`,
+    `  author={${escapeBibtexValue(author)}},`,
+    `  year={${escapeBibtexValue(year)}}`,
+    "}",
+  ].join("\n");
+}
+
+function normalizeBibtexKey(bibtex: string, citeKey: string) {
+  const trimmed = bibtex.trim();
+  if (!trimmed) return buildManualBibtex({ citeKey, title: "Untitled", author: "Author", year: String(new Date().getFullYear()) });
+  return trimmed.replace(/^(@\w+\s*\{\s*)[^,\s]+/m, `$1${citeKey}`);
 }
 
 function uploadPathEntries(files: File[], mode: "text" | "asset" | "mixed") {
